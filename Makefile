@@ -165,7 +165,7 @@ verify-trivy-checksums:
 	@trivy_version="$(TRIVY_VERSION)"; trivy_version="$${trivy_version#v}"; \
 	for arch in 64bit ARM64 PPC64LE s390x; do \
 		asset="trivy_$${trivy_version}_Linux-$${arch}.tar.gz"; \
-		awk -v asset="$${asset}" '\''{sub(/\r$$/, "", $$2)} $$2 == asset && $$1 ~ /^[0-9a-f]{64}$$/ {found=1} END {exit found ? 0 : 1}'\'' python-versions/trivy-checksums.txt || \
+		awk -v asset="$${asset}" '{sub(/\r$$/, "", $$2)} $$2 == asset && $$1 ~ /^[0-9a-f]{64}$$/ {found=1} END {exit found ? 0 : 1}' python-versions/trivy-checksums.txt || \
 			(echo "ERROR: Missing pinned checksum for $${asset} in python-versions/trivy-checksums.txt" && exit 1); \
 	done
 
