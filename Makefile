@@ -9,6 +9,9 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
+# BuildKit is required for --secret mounts (GitHub token forwarding)
+export DOCKER_BUILDKIT := 1
+
 ifeq ($(origin V), undefined)
   Q := @
 else
@@ -21,7 +24,8 @@ ACTIONS_PYTHON_VERSIONS ?= 3.15.0-alpha.5-21016111327
 POWERSHELL_VERSION      ?= v7.5.2
 POWERSHELL_NATIVE_VERSION ?= v7.4.0
 UBUNTU_VERSION          ?= 24.04
-TRIVY_VERSION           ?= v0.69.2
+TRIVY_VERSION_FILE      ?= .trivyversion
+TRIVY_VERSION           ?= $(strip $(shell if [ -f "$(TRIVY_VERSION_FILE)" ]; then cat "$(TRIVY_VERSION_FILE)"; else echo v0.70.0; fi))
 
 # Security Gates (0 = Log Only, 1 = Fail Build)
 FAIL_ON_CRITICAL        ?= 1
@@ -39,12 +43,17 @@ else
   ARCH := $(ARCH_RAW)
 endif
 
-# Container Engine Detection
-CONTAINER_ENGINE := $(shell command -v podman 2>/dev/null || command -v docker)
+# Container Engine (Docker required — BuildKit needed for secret mounts)
+CONTAINER_ENGINE := $(shell command -v docker)
 
 ifeq ($(strip $(CONTAINER_ENGINE)),)
-  $(error No container runtime found. Please install `docker` or `podman`)
+	$(error Docker is required. BuildKit is needed for --secret mounts.)
 endif
+
+# Secret flags for Docker BuildKit (forwards GITHUB_TOKEN into the build)
+# Empty if GITHUB_TOKEN is not set — the Dockerfile handles missing secrets.
+c := ,
+DOCKER_SECRET_FLAGS = $(if $(GITHUB_TOKEN),--secret id=github_token$cenv=GITHUB_TOKEN,)
 
 # --- Internal Variables -------------------------------------------------------
 
@@ -72,7 +81,7 @@ PS_PREREQS := \
 
 # --- Targets ------------------------------------------------------------------
 
-.PHONY: all powershell clean help verify-gate verify-trivy-version verify-trivy-checksums
+.PHONY: all powershell clean help verify-gate verify-trivy-version verify-trivy-checksums update-trivy-pins
 
 # Updated 'all' to target the new host artifact name
 all: $(OUTPUT_DIR)/$(HOST_ARTIFACT_NAME) verify-gate
@@ -82,6 +91,7 @@ $(OUTPUT_DIR)/$(HOST_ARTIFACT_NAME): verify-trivy-version verify-trivy-checksums
 	@echo "--- Building Python $(PYTHON_VERSION) Image ($(ARCH)) ---"
 	@echo "    Security Gate: CRIT=$(FAIL_ON_CRITICAL) HIGH=$(FAIL_ON_HIGH)"
 	$(Q)cd python-versions && $(CONTAINER_ENGINE) build \
+		$(DOCKER_SECRET_FLAGS) \
 		--network=host \
 		--build-arg PYTHON_VERSION=$(PYTHON_VERSION) \
 		--build-arg ACTIONS_PYTHON_VERSIONS=$(ACTIONS_PYTHON_VERSIONS) \
@@ -138,17 +148,15 @@ verify-gate:
 
 verify-trivy-version:
 	@echo "--- Verifying Trivy release $(TRIVY_VERSION) ---"
-	@curl -fsSL "https://api.github.com/repos/aquasecurity/trivy/releases/tags/$(TRIVY_VERSION)" >/dev/null || \
-		(echo "ERROR: Trivy release $(TRIVY_VERSION) not found. Set a valid TRIVY_VERSION (e.g. v0.69.2)." && exit 1)
+	@bash ./scripts/verify-trivy.sh tag "$(TRIVY_VERSION)"
 
 verify-trivy-checksums:
 	@echo "--- Verifying pinned Trivy checksums for $(TRIVY_VERSION) ---"
-	@trivy_version="$(TRIVY_VERSION)"; trivy_version="$${trivy_version#v}"; \
-	for arch in 64bit ARM64 PPC64LE s390x; do \
-		asset="trivy_$${trivy_version}_Linux-$${arch}.tar.gz"; \
-		awk -v asset="$${asset}" '{sub(/\r$$/, "", $$2)} $$2 == asset && $$1 ~ /^[0-9a-f]{64}$$/ {found=1} END {exit found ? 0 : 1}' python-versions/trivy-checksums.txt || \
-			(echo "ERROR: Missing pinned checksum for $${asset} in python-versions/trivy-checksums.txt" && exit 1); \
-	done
+	@bash ./scripts/verify-trivy.sh checksums "$(TRIVY_VERSION)"
+
+update-trivy-pins:
+	@echo "--- Updating Trivy version pin $(TRIVY_VERSION) ---"
+	@bash ./scripts/update-trivy-checksums.sh "$(TRIVY_VERSION)"
 # 3. Build Base PowerShell Image
 powershell: $(PS_PREREQS)
 	@echo "--- Building PowerShell Base Image ---"
